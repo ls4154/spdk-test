@@ -86,13 +86,14 @@ register_ns(struct spdk_nvme_ctrlr *ctrlr, struct spdk_nvme_ns *ns)
 	entry->next = g_namespaces;
 	g_namespaces = entry;
 
-	printf("  Namespace ID: %d size: %juGB\n", spdk_nvme_ns_get_id(ns),
+	fprintf(stderr, "  Namespace ID: %d size: %juGB\n", spdk_nvme_ns_get_id(ns),
 	       spdk_nvme_ns_get_size(ns) / 1000000000);
 }
 
 struct hello_world_sequence {
 	struct ns_entry	*ns_entry;
 	char		*buf;
+	uint64_t	phys_addr;
 	int		is_completed;
 };
 
@@ -111,7 +112,7 @@ read_complete(void *arg, const struct spdk_nvme_cpl *completion)
 	}
 
 	wcnt = write(g_fd, sequence->buf, g_sectsize * g_lbacnt);
-	printf("%d bytes\n", wcnt);
+	fprintf(stderr, "%d bytes\n", wcnt);
 
 	spdk_free(sequence->buf);
 }
@@ -142,14 +143,17 @@ do_rw(void)
 	if (ns_entry != NULL) {
 		ns_entry->qpair = spdk_nvme_ctrlr_alloc_io_qpair(ns_entry->ctrlr, NULL, 0);
 		if (ns_entry->qpair == NULL) {
-			printf("ERROR: spdk_nvme_ctrlr_alloc_io_qpair() failed\n");
+			fprintf(stderr, "ERROR: spdk_nvme_ctrlr_alloc_io_qpair() failed\n");
 			return;
 		}
 
 		g_sectsize = spdk_nvme_ns_get_sector_size(ns_entry->ns);
-		sequence.buf = spdk_zmalloc(g_sectsize * g_lbacnt, 0x1000, NULL, SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA);
+		fprintf(stderr, "Sector size %u\n", g_sectsize);
+		sequence.buf = spdk_zmalloc(g_sectsize * g_lbacnt, 0x1000, &sequence.phys_addr,
+				SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA);
+		printf("Buffer Phsysical Address: %lx\n", sequence.phys_addr);
 		if (sequence.buf == NULL) {
-			printf("ERROR: write buffer allocation failed\n");
+			fprintf(stderr, "ERROR: write buffer allocation failed\n");
 			return;
 		}
 		sequence.is_completed = 0;
@@ -157,7 +161,7 @@ do_rw(void)
 
 		if (g_write) {
 			int rcnt = read(g_fd, sequence.buf, g_sectsize * g_lbacnt);
-			printf("%d bytes\n", rcnt);
+			fprintf(stderr, "%d bytes\n", rcnt);
 
 			rc = spdk_nvme_ns_cmd_write(ns_entry->ns, ns_entry->qpair, sequence.buf,
 					g_startlba, g_lbacnt, write_complete, &sequence, 0);
@@ -186,7 +190,7 @@ static bool
 probe_cb(void *cb_ctx, const struct spdk_nvme_transport_id *trid,
 	 struct spdk_nvme_ctrlr_opts *opts)
 {
-	printf("Attaching to %s\n", trid->traddr);
+	fprintf(stderr, "Attaching to %s\n", trid->traddr);
 
 	return true;
 }
@@ -206,7 +210,7 @@ attach_cb(void *cb_ctx, const struct spdk_nvme_transport_id *trid,
 		exit(1);
 	}
 
-	printf("Attached to %s\n", trid->traddr);
+	fprintf(stderr, "Attached to %s\n", trid->traddr);
 
 	cdata = spdk_nvme_ctrlr_get_data(ctrlr);
 
@@ -217,7 +221,7 @@ attach_cb(void *cb_ctx, const struct spdk_nvme_transport_id *trid,
 	g_controllers = entry;
 
 	num_ns = spdk_nvme_ctrlr_get_num_ns(ctrlr);
-	printf("Using controller %s with %d namespaces.\n", entry->name, num_ns);
+	fprintf(stderr, "Using controller %s with %d namespaces.\n", entry->name, num_ns);
 	for (nsid = 1; nsid <= num_ns; nsid++) {
 		ns = spdk_nvme_ctrlr_get_ns(ctrlr, nsid);
 		if (ns == NULL) {
@@ -251,15 +255,15 @@ cleanup(void)
 static void
 usage(const char *program_name)
 {
-	printf("%s [options]", program_name);
-	printf("\n");
-	printf("options:\n");
-	printf(" -V         enumerate VMD\n");
-	printf(" -w         write\n");
-	printf(" -r         read\n");
-	printf(" -f FILE    input/output file\n");
-	printf(" -s LBA     start lba\n");
-	printf(" -c NLBA    number of blocks\n");
+	fprintf(stderr, "%s [options]", program_name);
+	fprintf(stderr, "\n");
+	fprintf(stderr, "options:\n");
+	fprintf(stderr, " -V         enumerate VMD\n");
+	fprintf(stderr, " -w         write\n");
+	fprintf(stderr, " -r         read\n");
+	fprintf(stderr, " -f FILE    input/output file\n");
+	fprintf(stderr, " -s LBA     start lba\n");
+	fprintf(stderr, " -c NLBA    number of blocks\n");
 }
 
 static int
@@ -287,7 +291,7 @@ parse_args(int argc, char **argv)
 		case 'c':
 			g_lbacnt = atoi(optarg);
 			if (g_lbacnt <= 0) {
-				printf("wrong lbacnt\n");
+				fprintf(stderr, "wrong lbacnt\n");
 				return 1;
 			}
 			break;
@@ -318,7 +322,7 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
-	printf("Initializing NVMe Controllers\n");
+	fprintf(stderr, "Initializing NVMe Controllers\n");
 
 	if (g_vmd && spdk_vmd_init()) {
 		fprintf(stderr, "Failed to initialize VMD."
@@ -360,7 +364,7 @@ int main(int argc, char **argv)
 		}
 	}
 
-	printf("Initialization complete.\n");
+	fprintf(stderr, "Initialization complete.\n");
 	do_rw();
 	cleanup();
 	if (g_vmd)

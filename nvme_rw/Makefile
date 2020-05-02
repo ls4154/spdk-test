@@ -31,7 +31,7 @@
 #  OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #
 
-SPDK_DIR ?= ../spdk
+SPDK_DIR ?= ../../spdk
 SPDK_ROOT_DIR := $(abspath $(SPDK_DIR))
 
 APP = nvme_rw

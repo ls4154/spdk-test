@@ -45,8 +45,7 @@
 
 #define COSMOS_OBJ_SIZE       (4 * 1024 * 1024)
 #define COSMOS_OBJ_ALIGN      (0x10000)
-#define COSMOS_OBJ_BLOCK_SIZE (16 * 1024)
-#define HUGEPAGE_SIZE         (2 * 1042 * 1024)
+#define COSMOS_OBJ_BLOCK_SIZE (4 * 1024)
 
 struct ctrlr_entry {
 	struct spdk_nvme_ctrlr	*ctrlr;
@@ -105,9 +104,7 @@ register_ns(struct spdk_nvme_ctrlr *ctrlr, struct spdk_nvme_ns *ns)
 struct hello_world_sequence {
 	struct ns_entry	*ns_entry;
 	char		*buf;
-	char		*buf2;
 	uint64_t	phys_addr;
-	uint64_t	phys_addr2;
 	int		is_completed;
 };
 
@@ -115,7 +112,7 @@ static void
 read_complete(void *arg, const struct spdk_nvme_cpl *completion)
 {
 	struct hello_world_sequence *sequence = arg;
-	int wcnt;
+	int wcnt = 0;
 
 	sequence->is_completed = 1;
 	if (spdk_nvme_cpl_is_error(completion)) {
@@ -125,8 +122,7 @@ read_complete(void *arg, const struct spdk_nvme_cpl *completion)
 		sequence->is_completed = 2;
 	}
 
-	wcnt = write(g_fd, sequence->buf, HUGEPAGE_SIZE);
-	wcnt += write(g_fd, sequence->buf2, HUGEPAGE_SIZE);
+	wcnt = write(g_fd, sequence->buf, COSMOS_OBJ_SIZE);
 	fprintf(stderr, "\n\nread %d bytes\n", wcnt);
 
 	spdk_free(sequence->buf);
@@ -163,9 +159,7 @@ do_rw(void)
 		}
 
 		g_sectsize = spdk_nvme_ns_get_sector_size(ns_entry->ns);
-		sequence.buf = spdk_zmalloc(HUGEPAGE_SIZE, COSMOS_OBJ_ALIGN, &sequence.phys_addr,
-						SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA);
-		sequence.buf2 = spdk_zmalloc(HUGEPAGE_SIZE, COSMOS_OBJ_ALIGN, &sequence.phys_addr2,
+		sequence.buf = spdk_zmalloc(COSMOS_OBJ_SIZE, COSMOS_OBJ_ALIGN, &sequence.phys_addr,
 						SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA);
 		if (sequence.buf == NULL) {
 			fprintf(stderr, "ERROR: write buffer allocation failed\n");
@@ -174,20 +168,31 @@ do_rw(void)
 		sequence.is_completed = 0;
 		sequence.ns_entry = ns_entry;
 
-		g_cmd.dptr.prp.prp1 = sequence.phys_addr;
-		g_cmd.dptr.prp.prp2 = sequence.phys_addr2;
+		// check buffer is contiguous
+		if (spdk_vtophys(sequence.buf + 2 * 1024 * 1024, NULL) !=
+				sequence.phys_addr + 2 * 1024 * 1024) {
+			fprintf(stderr, "ERROR: buffer not contiguous\n");
+			return;
+		}
+
+		g_cmd.rsvd2 = (sequence.phys_addr & 0xFFFFFFFFULL);
+		g_cmd.rsvd3 = (sequence.phys_addr >> 32);
 		g_cmd.cdw10 = g_key;
 		g_cmd.cdw12 = 255;
 
+		fprintf(stderr, "buf addr lo: %x\n", g_cmd.rsvd2);
+		fprintf(stderr, "buf addr hi: %x\n", g_cmd.rsvd3);
+		fprintf(stderr, "key: %u\n", g_cmd.cdw10);
+		fprintf(stderr, "nsectors: %u\n", g_cmd.cdw12);
+
 		if (g_write) {
-			int rcnt = read(g_fd, sequence.buf, HUGEPAGE_SIZE);
-			rcnt += read(g_fd, sequence.buf2, HUGEPAGE_SIZE);
+			int rcnt = read(g_fd, sequence.buf, COSMOS_OBJ_SIZE);
 			fprintf(stderr, "\n\nwrite %d bytes\n", rcnt);
 
 			g_cmd.opc = SPDK_NVME_OPC_COSMOS_WRITE;
 
 			rc = spdk_nvme_ctrlr_io_cmd_raw_no_payload_build(ns_entry->ctrlr, ns_entry->qpair, &g_cmd,
-					write_complete, &sequence);
+									 write_complete, &sequence);
 			if (rc != 0) {
 				fprintf(stderr, "starting write I/O failed\n");
 				exit(1);
@@ -196,7 +201,7 @@ do_rw(void)
 			g_cmd.opc = SPDK_NVME_OPC_COSMOS_READ;
 
 			rc = spdk_nvme_ctrlr_io_cmd_raw_no_payload_build(ns_entry->ctrlr, ns_entry->qpair, &g_cmd,
-					read_complete, &sequence);
+									 read_complete, &sequence);
 			if (rc != 0) {
 				fprintf(stderr, "starting read I/O failed\n");
 				exit(1);

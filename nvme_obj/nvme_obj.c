@@ -123,7 +123,7 @@ read_complete(void *arg, const struct spdk_nvme_cpl *completion)
 		sequence->is_completed = 2;
 	}
 
-	wcnt = write(g_fd, sequence->buf, g_lbacnt * COSMOS_OBJ_BLOCK_SIZE);
+	wcnt = write(g_fd, sequence->buf, (g_lbacnt + 1) * COSMOS_OBJ_BLOCK_SIZE);
 	fprintf(stderr, "\n\nread %d bytes\n", wcnt);
 
 	spdk_free(sequence->buf);
@@ -187,7 +187,7 @@ do_rw(void)
 		fprintf(stderr, "nsectors: %u\n", g_cmd.cdw12);
 
 		if (g_write) {
-			int rcnt = read(g_fd, sequence.buf, g_lbacnt * COSMOS_OBJ_BLOCK_SIZE);
+			int rcnt = read(g_fd, sequence.buf, (g_lbacnt + 1) * COSMOS_OBJ_BLOCK_SIZE);
 			fprintf(stderr, "\n\nwrite %d bytes\n", rcnt);
 
 			g_cmd.opc = SPDK_NVME_OPC_COSMOS_WRITE;

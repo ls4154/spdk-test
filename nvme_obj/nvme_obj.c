@@ -71,6 +71,7 @@ static int g_fd;
 static uint32_t g_key = 0;
 
 static unsigned int g_sectsize;
+static uint32_t g_lbacnt = 0;
 
 static struct spdk_nvme_cmd g_cmd = {
 	.opc = SPDK_NVME_OPC_COSMOS_READ,
@@ -122,7 +123,7 @@ read_complete(void *arg, const struct spdk_nvme_cpl *completion)
 		sequence->is_completed = 2;
 	}
 
-	wcnt = write(g_fd, sequence->buf, COSMOS_OBJ_SIZE);
+	wcnt = write(g_fd, sequence->buf, g_lbacnt * COSMOS_OBJ_BLOCK_SIZE);
 	fprintf(stderr, "\n\nread %d bytes\n", wcnt);
 
 	spdk_free(sequence->buf);
@@ -178,7 +179,7 @@ do_rw(void)
 		g_cmd.rsvd2 = (sequence.phys_addr & 0xFFFFFFFFULL);
 		g_cmd.rsvd3 = (sequence.phys_addr >> 32);
 		g_cmd.cdw10 = g_key;
-		g_cmd.cdw12 = 255;
+		g_cmd.cdw12 = g_lbacnt;
 
 		fprintf(stderr, "buf addr lo: %x\n", g_cmd.rsvd2);
 		fprintf(stderr, "buf addr hi: %x\n", g_cmd.rsvd3);
@@ -186,7 +187,7 @@ do_rw(void)
 		fprintf(stderr, "nsectors: %u\n", g_cmd.cdw12);
 
 		if (g_write) {
-			int rcnt = read(g_fd, sequence.buf, COSMOS_OBJ_SIZE);
+			int rcnt = read(g_fd, sequence.buf, g_lbacnt * COSMOS_OBJ_BLOCK_SIZE);
 			fprintf(stderr, "\n\nwrite %d bytes\n", rcnt);
 
 			g_cmd.opc = SPDK_NVME_OPC_COSMOS_WRITE;
@@ -300,7 +301,7 @@ parse_args(int argc, char **argv)
 {
 	int op;
 
-	while ((op = getopt(argc, argv, "Vwrf:k:")) != -1) {
+	while ((op = getopt(argc, argv, "Vwrf:c:k:")) != -1) {
 		switch (op) {
 		case 'V':
 			g_vmd = true;
@@ -313,6 +314,13 @@ parse_args(int argc, char **argv)
 			break;
 		case 'f':
 			g_fpath = optarg;
+			break;
+		case 'c':
+			g_lbacnt = atoi(optarg);
+			if (g_lbacnt < 0 || g_lbacnt > 1023) {
+				fprintf(stderr, "wrong lbacnt\n");
+				return 1;
+			}
 			break;
 		case 'k':
 			g_key = atoi(optarg);

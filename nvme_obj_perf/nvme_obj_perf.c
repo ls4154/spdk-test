@@ -14,10 +14,11 @@
 
 #define COSMOS_OBJ_SIZE		(4 * 1024 * 1024)
 #define COSMOS_OBJ_ALIGN	(0x1000)
-#define COSMOS_OBJ_BLOCK_SIZE	(4 * 1024)
+#define COSMOS_OBJ_SECTSIZE	(4 * 1024)
 #define COSMOS_MAX_OBJNO	(128)
 
-#define COSMOS_SECTSIZE		(4 * 1024)
+#define NANOSEC_PER_SEC 1000000000
+#define BYTE_PER_MB (1024 * 1024)
 
 struct ctrlr_entry {
 	struct spdk_nvme_ctrlr	*ctrlr;
@@ -37,11 +38,14 @@ static struct ns_entry *g_namespaces = NULL;
 
 static bool g_vmd = false;
 
+static int g_sectsize;
+
 static bool g_write;
+static int g_sectcnt = 1024;
 static int g_qdepth = 1;
 static int g_time = 10;
 
-static bool g_use_obj = true;
+static bool g_use_obj = false;
 
 static int g_report_interval = 0;
 
@@ -88,34 +92,35 @@ struct obj_perf_seq {
 };
 
 static void
-obj_complete(void *arg, const struct spdk_nvme_cpl *completion)
+obj_complete(void *arg, const struct spdk_nvme_cpl *cpl)
 {
-	struct obj_perf_seq *sequence = arg;
+	struct obj_perf_seq *seq = arg;
 	struct timespec ts_cur;
-	struct ns_entry* ns_entry = sequence->ns_entry;
+	struct ns_entry* ns_entry = seq->ns_entry;
 
-	if (spdk_nvme_cpl_is_error(completion)) {
-		spdk_nvme_qpair_print_completion(sequence->ns_entry->qpair, (struct spdk_nvme_cpl *)completion);
-		fprintf(stderr, "I/O error status: %s\n", spdk_nvme_cpl_get_status_string(&completion->status));
+	if (spdk_nvme_cpl_is_error(cpl)) {
+		spdk_nvme_qpair_print_completion(seq->ns_entry->qpair, (struct spdk_nvme_cpl *)cpl);
+		fprintf(stderr, "I/O error status: %s\n", spdk_nvme_cpl_get_status_string(&cpl->status));
 		fprintf(stderr, "I/O failed, aborting run\n");
-		sequence->is_completed = 2;
+		seq->is_completed = 2;
 	}
 	if (g_done) {
-		sequence->is_completed = 1;
+		seq->is_completed = 1;
 	} else {
 		int rc;
 		g_cnt_done++;
 
 		clock_gettime(CLOCK_MONOTONIC, &ts_cur);
-		g_latency_sum += (ts_cur.tv_sec - sequence->ts_start.tv_sec) * 1000000000 + (ts_cur.tv_nsec - sequence->ts_start.tv_nsec);
+		g_latency_sum += 1LL * (ts_cur.tv_sec - seq->ts_start.tv_sec) * NANOSEC_PER_SEC
+				 + (ts_cur.tv_nsec - seq->ts_start.tv_nsec);
 
-		clock_gettime(CLOCK_MONOTONIC, &sequence->ts_start);
-		g_obj_cmd.rsvd2 = (sequence->phys_addr & 0xFFFFFFFFULL);
-		g_obj_cmd.rsvd3 = (sequence->phys_addr >> 32);
+		clock_gettime(CLOCK_MONOTONIC, &seq->ts_start);
+		g_obj_cmd.rsvd2 = (seq->phys_addr & 0xFFFFFFFFULL);
+		g_obj_cmd.rsvd3 = (seq->phys_addr >> 32);
 		g_obj_cmd.cdw10 = (g_cnt++) % COSMOS_MAX_OBJNO;
-		g_obj_cmd.cdw12 = 1023;
+		g_obj_cmd.cdw12 = g_sectcnt - 1;
 		rc = spdk_nvme_ctrlr_io_cmd_raw_no_payload_build(ns_entry->ctrlr, ns_entry->qpair, &g_obj_cmd,
-								 obj_complete, sequence);
+								 obj_complete, seq);
 		if (rc != 0) {
 			fprintf(stderr, "starting obj I/O failed\n");
 			exit(1);
@@ -124,32 +129,34 @@ obj_complete(void *arg, const struct spdk_nvme_cpl *completion)
 }
 
 static void
-lba_complete(void *arg, const struct spdk_nvme_cpl *completion)
+lba_complete(void *arg, const struct spdk_nvme_cpl *cpl)
 {
-	struct obj_perf_seq *sequence = arg;
+	struct obj_perf_seq *seq = arg;
 	struct timespec ts_cur;
-	struct ns_entry* ns_entry = sequence->ns_entry;
+	struct ns_entry* ns_entry = seq->ns_entry;
 
 
-	if (spdk_nvme_cpl_is_error(completion)) {
-		spdk_nvme_qpair_print_completion(sequence->ns_entry->qpair, (struct spdk_nvme_cpl *)completion);
-		fprintf(stderr, "I/O error status: %s\n", spdk_nvme_cpl_get_status_string(&completion->status));
+	if (spdk_nvme_cpl_is_error(cpl)) {
+		spdk_nvme_qpair_print_completion(seq->ns_entry->qpair, (struct spdk_nvme_cpl *)cpl);
+		fprintf(stderr, "I/O error status: %s\n", spdk_nvme_cpl_get_status_string(&cpl->status));
 		fprintf(stderr, "I/O failed, aborting run\n");
-		sequence->is_completed = 2;
+		seq->is_completed = 2;
 	}
 	if (g_done) {
-		sequence->is_completed = 1;
+		seq->is_completed = 1;
 	} else {
 		int rc;
 		g_cnt_done++;
 
 		clock_gettime(CLOCK_MONOTONIC, &ts_cur);
-		g_latency_sum += (ts_cur.tv_sec - sequence->ts_start.tv_sec) * 1000000000 + (ts_cur.tv_nsec - sequence->ts_start.tv_nsec);
+		g_latency_sum += 1LL * (ts_cur.tv_sec - seq->ts_start.tv_sec) * NANOSEC_PER_SEC
+				 + (ts_cur.tv_nsec - seq->ts_start.tv_nsec);
 
-		clock_gettime(CLOCK_MONOTONIC, &sequence->ts_start);
-		uint64_t target_lba = ((g_cnt++) % COSMOS_MAX_OBJNO) * (COSMOS_OBJ_SIZE / COSMOS_SECTSIZE);
-		uint32_t target_cnt = COSMOS_OBJ_SIZE / COSMOS_SECTSIZE;
-		rc = spdk_nvme_ns_cmd_write(ns_entry->ns, ns_entry->qpair, sequence->buf, target_lba, target_cnt, lba_complete, sequence, 0);
+		clock_gettime(CLOCK_MONOTONIC, &seq->ts_start);
+		uint64_t target_lba = ((g_cnt++) % COSMOS_MAX_OBJNO) * (COSMOS_OBJ_SIZE / g_sectsize);
+		uint32_t target_cnt = g_sectcnt;
+		rc = spdk_nvme_ns_cmd_write(ns_entry->ns, ns_entry->qpair, seq->buf, target_lba,
+					    target_cnt, lba_complete, seq, 0);
 		if (rc != 0) {
 			fprintf(stderr, "starting obj I/O failed\n");
 			exit(1);
@@ -161,13 +168,18 @@ static void
 do_rw_obj(void)
 {
 	struct ns_entry		*ns_entry;
-	struct obj_perf_seq	*sequence;
+	struct obj_perf_seq	*seq;
 	int			rc;
 
 	struct spdk_nvme_io_qpair_opts def_opts;
 
 	ns_entry = g_namespaces;
 	if (ns_entry != NULL) {
+		if (g_sectcnt > 1024) {
+			fprintf(stderr, "IO size exceed 4M\n");
+			return;
+		}
+
 		ns_entry->qpair = spdk_nvme_ctrlr_alloc_io_qpair(ns_entry->ctrlr, NULL, 0);
 		if (ns_entry->qpair == NULL) {
 			fprintf(stderr, "ERROR: spdk_nvme_ctrlr_alloc_io_qpair() failed\n");
@@ -180,26 +192,26 @@ do_rw_obj(void)
 			return;
 		}
 
-		sequence = malloc(sizeof(struct obj_perf_seq) * g_qdepth);
-		memset(sequence, 0, sizeof(struct obj_perf_seq) * g_qdepth); 
-		if (sequence == NULL) {
+		seq = malloc(sizeof(struct obj_perf_seq) * g_qdepth);
+		memset(seq, 0, sizeof(struct obj_perf_seq) * g_qdepth); 
+		if (seq == NULL) {
 			perror("malloc");
 			return;
 		}
 
 		for (int i = 0; i < g_qdepth; i++) {
-			sequence[i].ns_entry = ns_entry;
-			sequence[i].buf = spdk_zmalloc(COSMOS_OBJ_SIZE, COSMOS_OBJ_ALIGN, &sequence[i].phys_addr,
+			seq[i].ns_entry = ns_entry;
+			seq[i].buf = spdk_zmalloc(COSMOS_OBJ_SIZE, COSMOS_OBJ_ALIGN, &seq[i].phys_addr,
 							SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA);
-			if (sequence[i].buf == NULL) {
+			if (seq[i].buf == NULL) {
 				fprintf(stderr, "ERROR: spdk zmalloc failed\n");
 				return;
 			}
-			sequence[i].is_completed = 0;
+			seq[i].is_completed = 0;
 
 			// check buffer is contiguous
-			if (spdk_vtophys(sequence[i].buf + 2 * 1024 * 1024, NULL) !=
-					sequence[i].phys_addr + 2 * 1024 * 1024) {
+			if (spdk_vtophys(seq[i].buf + 2 * 1024 * 1024, NULL) !=
+					seq[i].phys_addr + 2 * 1024 * 1024) {
 				fprintf(stderr, "ERROR: buffer not contiguous\n");
 				return;
 			}
@@ -213,17 +225,14 @@ do_rw_obj(void)
 
 		// initial io
 		for (int i = 0; i < g_qdepth; i++) {
-			clock_gettime(CLOCK_MONOTONIC, &sequence[i].ts_start);
-			g_obj_cmd.rsvd2 = (sequence[i].phys_addr & 0xFFFFFFFFULL);
-			g_obj_cmd.rsvd3 = (sequence[i].phys_addr >> 32);
+			clock_gettime(CLOCK_MONOTONIC, &seq[i].ts_start);
+			g_obj_cmd.rsvd2 = (seq[i].phys_addr & 0xFFFFFFFFULL);
+			g_obj_cmd.rsvd3 = (seq[i].phys_addr >> 32);
 			g_obj_cmd.cdw10 = (g_cnt++) % COSMOS_MAX_OBJNO;
-			g_obj_cmd.cdw12 = 1023;
-			/* fprintf(stderr, "buf addr lo: %x\n", g_obj_cmd.rsvd2); */
-			/* fprintf(stderr, "buf addr hi: %x\n", g_obj_cmd.rsvd3); */
-			/* fprintf(stderr, "obj num: %u\n", g_obj_cmd.cdw10); */
-			/* fprintf(stderr, "nsectors: %u\n", g_obj_cmd.cdw12); */
-			rc = spdk_nvme_ctrlr_io_cmd_raw_no_payload_build(ns_entry->ctrlr, ns_entry->qpair, &g_obj_cmd,
-									 obj_complete, &sequence[i]);
+			g_obj_cmd.cdw12 = g_sectcnt - 1;
+			rc = spdk_nvme_ctrlr_io_cmd_raw_no_payload_build(ns_entry->ctrlr,
+									 ns_entry->qpair, &g_obj_cmd,
+									 obj_complete, &seq[i]);
 			if (rc != 0) {
 				fprintf(stderr, "starting obj I/O failed\n");
 				exit(1);
@@ -236,33 +245,38 @@ do_rw_obj(void)
 			spdk_nvme_qpair_process_completions(ns_entry->qpair, 0);
 			clock_gettime(CLOCK_MONOTONIC, &ts_cur);
 
-			long long time_diff = (ts_cur.tv_sec - ts_last.tv_sec) * 1000000000LL + (ts_cur.tv_nsec - ts_last.tv_nsec);
-			if (g_report_interval != 0 && time_diff >= g_report_interval * 1000000000LL) {
-				printf(" throughput: %f MB/s\n", (double)COSMOS_OBJ_SIZE * (g_cnt_done - cnt_done_last)
-									/ time_diff / (1024 * 1024) * (1000000000LL));
+			long long time_diff = 1LL * (ts_cur.tv_sec - ts_last.tv_sec) * NANOSEC_PER_SEC
+					      + (ts_cur.tv_nsec - ts_last.tv_nsec);
+			if (g_report_interval != 0 && time_diff >= 1LL * g_report_interval * NANOSEC_PER_SEC) {
+				printf(" throughput: %f MB/s\n",
+				       (double)(COSMOS_OBJ_SECTSIZE * g_sectcnt) * (g_cnt_done - cnt_done_last)
+				       / time_diff / BYTE_PER_MB * NANOSEC_PER_SEC);
 				ts_last = ts_cur;
 				cnt_done_last = g_cnt_done;
 			}
 
-			if ((ts_cur.tv_sec - ts_start.tv_sec) * 1000000000LL + (ts_cur.tv_nsec - ts_start.tv_nsec)
-			    >= g_time * 1000000000LL) {
+			if (1LL * (ts_cur.tv_sec - ts_start.tv_sec) * NANOSEC_PER_SEC
+			    + (ts_cur.tv_nsec - ts_start.tv_nsec) >= 1LL * g_time * NANOSEC_PER_SEC) {
 				break;
 			}
 		}
 
 		g_done = true;
 
-		long long elapsed_time = (ts_cur.tv_sec - ts_start.tv_sec) * 1000000000LL + (ts_cur.tv_nsec - ts_start.tv_nsec);
+		long long elapsed_time = 1LL * (ts_cur.tv_sec - ts_start.tv_sec) * NANOSEC_PER_SEC
+					 + (ts_cur.tv_nsec - ts_start.tv_nsec);
 		printf("elapsed time: %lld ns\n",  elapsed_time);
 		printf("ops count: %d\n",  g_cnt_done);
-		printf("throughput: %f MB/s\n", (double)COSMOS_OBJ_SIZE * g_cnt_done / elapsed_time / (1024 * 1024) * (1000000000LL));
+		printf("throughput: %f MB/s\n",
+		       (double)(COSMOS_OBJ_SECTSIZE * g_sectcnt) * g_cnt_done
+		       / elapsed_time / BYTE_PER_MB * NANOSEC_PER_SEC);
 		printf("avg latency per op: %f ns\n", (double)g_latency_sum / g_cnt_done);
 
 		// check unfinished io
 		for (int i = 0; i < g_qdepth; i++) {
-			while (!sequence[i].is_completed)
+			while (!seq[i].is_completed)
 				spdk_nvme_qpair_process_completions(ns_entry->qpair, 0);
-			spdk_free(sequence[i].buf);
+			spdk_free(seq[i].buf);
 		}
 
 		spdk_nvme_ctrlr_free_io_qpair(ns_entry->qpair);
@@ -273,16 +287,18 @@ static void
 do_rw_lba(void)
 {
 	struct ns_entry		*ns_entry;
-	struct obj_perf_seq	*sequence;
+	struct obj_perf_seq	*seq;
 	int			rc;
 
 	struct spdk_nvme_io_qpair_opts def_opts;
 
 	ns_entry = g_namespaces;
 	if (ns_entry != NULL) {
-		int sectsize = spdk_nvme_ns_get_sector_size(ns_entry->ns);
-		if (sectsize != COSMOS_SECTSIZE) {
-			printf("Sector size: %d\n", sectsize);
+		g_sectsize = spdk_nvme_ns_get_sector_size(ns_entry->ns);
+		printf("Sector size: %d\n", g_sectsize);
+
+		if (1LL * g_sectsize * g_sectcnt > COSMOS_OBJ_SIZE) {
+			fprintf(stderr, "IO size exceed 4M\n");
 			return;
 		}
 
@@ -298,26 +314,26 @@ do_rw_lba(void)
 			return;
 		}
 
-		sequence = malloc(sizeof(struct obj_perf_seq) * g_qdepth);
-		memset(sequence, 0, sizeof(struct obj_perf_seq) * g_qdepth);
-		if (sequence == NULL) {
+		seq = malloc(sizeof(struct obj_perf_seq) * g_qdepth);
+		memset(seq, 0, sizeof(struct obj_perf_seq) * g_qdepth);
+		if (seq == NULL) {
 			perror("malloc");
 			return;
 		}
 
 		for (int i = 0; i < g_qdepth; i++) {
-			sequence[i].ns_entry = ns_entry;
-			sequence[i].buf = spdk_zmalloc(COSMOS_OBJ_SIZE, COSMOS_OBJ_ALIGN, &sequence[i].phys_addr,
+			seq[i].ns_entry = ns_entry;
+			seq[i].buf = spdk_zmalloc(COSMOS_OBJ_SIZE, COSMOS_OBJ_ALIGN, &seq[i].phys_addr,
 							SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA);
-			if (sequence[i].buf == NULL) {
+			if (seq[i].buf == NULL) {
 				fprintf(stderr, "ERROR: spdk zmalloc failed\n");
 				return;
 			}
-			sequence[i].is_completed = 0;
+			seq[i].is_completed = 0;
 
 			// check buffer is contiguous
-			if (spdk_vtophys(sequence[i].buf + 2 * 1024 * 1024, NULL) !=
-					sequence[i].phys_addr + 2 * 1024 * 1024) {
+			if (spdk_vtophys(seq[i].buf + 2 * 1024 * 1024, NULL) !=
+					seq[i].phys_addr + 2 * 1024 * 1024) {
 				fprintf(stderr, "ERROR: buffer not contiguous\n");
 				return;
 			}
@@ -331,12 +347,13 @@ do_rw_lba(void)
 
 		// initial io
 		for (int i = 0; i < g_qdepth; i++) {
-			clock_gettime(CLOCK_MONOTONIC, &sequence[i].ts_start);
-			uint64_t target_lba = ((g_cnt++) % COSMOS_MAX_OBJNO) * (COSMOS_OBJ_SIZE / 4096);
-			uint32_t target_cnt = COSMOS_OBJ_SIZE / 4096;
-			rc = spdk_nvme_ns_cmd_write(ns_entry->ns, ns_entry->qpair, sequence[i].buf, target_lba, target_cnt, lba_complete, &sequence[i], 0);
+			clock_gettime(CLOCK_MONOTONIC, &seq[i].ts_start);
+			uint64_t target_lba = ((g_cnt++) % COSMOS_MAX_OBJNO) * (COSMOS_OBJ_SIZE / g_sectsize);
+			uint32_t target_cnt = g_sectcnt;
+			rc = spdk_nvme_ns_cmd_write(ns_entry->ns, ns_entry->qpair, seq[i].buf,
+						    target_lba, target_cnt, lba_complete, &seq[i], 0);
 			if (rc != 0) {
-				fprintf(stderr, "starting obj I/O failed\n");
+				fprintf(stderr, "starting I/O failed\n");
 				exit(1);
 			}
 		}
@@ -347,33 +364,38 @@ do_rw_lba(void)
 			spdk_nvme_qpair_process_completions(ns_entry->qpair, 0);
 			clock_gettime(CLOCK_MONOTONIC, &ts_cur);
 
-			long long time_diff = (ts_cur.tv_sec - ts_last.tv_sec) * 1000000000LL + (ts_cur.tv_nsec - ts_last.tv_nsec);
-			if (g_report_interval != 0 && time_diff >= g_report_interval * 1000000000LL) {
-				printf(" throughput: %f MB/s\n", (double)COSMOS_OBJ_SIZE * (g_cnt_done - cnt_done_last)
-									/ time_diff / (1024 * 1024) * (1000000000LL));
+			long long time_diff = 1LL * (ts_cur.tv_sec - ts_last.tv_sec) * NANOSEC_PER_SEC
+					      + (ts_cur.tv_nsec - ts_last.tv_nsec);
+			if (g_report_interval != 0 && time_diff >= 1LL * g_report_interval * NANOSEC_PER_SEC) {
+				printf(" throughput: %f MB/s\n",
+				       (double)(g_sectsize * g_sectcnt) * (g_cnt_done - cnt_done_last)
+				       / time_diff / BYTE_PER_MB * NANOSEC_PER_SEC);
 				ts_last = ts_cur;
 				cnt_done_last = g_cnt_done;
 			}
 
-			if ((ts_cur.tv_sec - ts_start.tv_sec) * 1000000000LL + (ts_cur.tv_nsec - ts_start.tv_nsec)
-			    >= g_time * 1000000000LL) {
+			if (1LL * (ts_cur.tv_sec - ts_start.tv_sec) * NANOSEC_PER_SEC
+			    + (ts_cur.tv_nsec - ts_start.tv_nsec) >= 1LL * g_time * NANOSEC_PER_SEC) {
 				break;
 			}
 		}
 
 		g_done = true;
 
-		long long elapsed_time = (ts_cur.tv_sec - ts_start.tv_sec) * 1000000000LL + (ts_cur.tv_nsec - ts_start.tv_nsec);
+		long long elapsed_time = 1LL * (ts_cur.tv_sec - ts_start.tv_sec) * NANOSEC_PER_SEC
+					 + (ts_cur.tv_nsec - ts_start.tv_nsec);
 		printf("elapsed time: %lld ns\n",  elapsed_time);
 		printf("ops count: %d\n",  g_cnt_done);
-		printf("throughput: %f MB/s\n", (double)COSMOS_OBJ_SIZE * g_cnt_done / elapsed_time / (1024 * 1024) * (1000000000LL));
+		printf("throughput: %f MB/s\n",
+		       (double)(g_sectsize * g_sectcnt) * g_cnt_done
+		       / elapsed_time / BYTE_PER_MB * NANOSEC_PER_SEC);
 		printf("avg latency per op: %f ns\n", (double)g_latency_sum / g_cnt_done);
 
 		// check unfinished io
 		for (int i = 0; i < g_qdepth; i++) {
-			while (!sequence[i].is_completed)
+			while (!seq[i].is_completed)
 				spdk_nvme_qpair_process_completions(ns_entry->qpair, 0);
-			spdk_free(sequence[i].buf);
+			spdk_free(seq[i].buf);
 		}
 
 		spdk_nvme_ctrlr_free_io_qpair(ns_entry->qpair);
@@ -454,10 +476,12 @@ usage(const char *program_name)
 	fprintf(stderr, " -V         enumerate VMD\n");
 	fprintf(stderr, " -w         write\n");
 	fprintf(stderr, " -r         read\n");
+	fprintf(stderr, " -c SECT    sector count per io (default 1024)\n");
 	fprintf(stderr, " -q DEPTH   queue depth (default 1)\n");
 	fprintf(stderr, " -t TIME    time in seconds (default 10)\n");
-	fprintf(stderr, " -l         use lba io command\n");
-	fprintf(stderr, " -i         throughput report interval, use 0 to disable (default 0)\n");
+	fprintf(stderr, " -l         use lba io command (default)\n");
+	fprintf(stderr, " -o         use obj io command\n");
+	fprintf(stderr, " -i SEC     throughput report interval, use 0 to disable (default 0)\n");
 }
 
 static int
@@ -465,7 +489,7 @@ parse_args(int argc, char **argv)
 {
 	int op;
 
-	while ((op = getopt(argc, argv, "Vwrq:t:li:")) != -1) {
+	while ((op = getopt(argc, argv, "Vwrc:q:t:loi:")) != -1) {
 		switch (op) {
 		case 'V':
 			g_vmd = true;
@@ -475,6 +499,13 @@ parse_args(int argc, char **argv)
 			break;
 		case 'r':
 			g_write = false;
+			break;
+		case 'c':
+			g_sectcnt = atoi(optarg);
+			if (g_sectcnt <= 0) {
+				fprintf(stderr, "wrong sector count\n");
+				return 1;
+			}
 			break;
 		case 'q':
 			g_qdepth = atoi(optarg);
@@ -488,6 +519,9 @@ parse_args(int argc, char **argv)
 			break;
 		case 'l':
 			g_use_obj = false;
+			break;
+		case 'o':
+			g_use_obj = true;
 			break;
 		case 'i':
 			g_report_interval = atoi(optarg);

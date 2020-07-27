@@ -40,10 +40,11 @@ static bool g_vmd = false;
 
 static int g_sectsize;
 
-static bool g_write;
+static bool g_write = true;
 static int g_sectcnt = 0;
 static int g_qdepth = 1;
 static int g_time = 10;
+static bool g_rand = false;
 
 static bool g_use_obj = false;
 
@@ -91,6 +92,15 @@ struct obj_perf_seq {
 	struct timespec ts_start;
 };
 
+static inline int next_idx(void)
+{
+	if (g_rand)
+		return rand() % COSMOS_MAX_OBJNO;
+	else
+		return (g_cnt++) % COSMOS_MAX_OBJNO;
+
+}
+
 static void
 obj_complete(void *arg, const struct spdk_nvme_cpl *cpl)
 {
@@ -117,7 +127,7 @@ obj_complete(void *arg, const struct spdk_nvme_cpl *cpl)
 		clock_gettime(CLOCK_MONOTONIC, &seq->ts_start);
 		g_obj_cmd.rsvd2 = (seq->phys_addr & 0xFFFFFFFFULL);
 		g_obj_cmd.rsvd3 = (seq->phys_addr >> 32);
-		g_obj_cmd.cdw10 = (g_cnt++) % COSMOS_MAX_OBJNO;
+		g_obj_cmd.cdw10 = next_idx();
 		g_obj_cmd.cdw12 = g_sectcnt - 1;
 		rc = spdk_nvme_ctrlr_io_cmd_raw_no_payload_build(ns_entry->ctrlr, ns_entry->qpair, &g_obj_cmd,
 								 obj_complete, seq);
@@ -153,7 +163,7 @@ lba_complete(void *arg, const struct spdk_nvme_cpl *cpl)
 				 + (ts_cur.tv_nsec - seq->ts_start.tv_nsec);
 
 		clock_gettime(CLOCK_MONOTONIC, &seq->ts_start);
-		uint64_t target_lba = ((g_cnt++) % COSMOS_MAX_OBJNO) * (COSMOS_OBJ_SIZE / g_sectsize);
+		uint64_t target_lba = next_idx() * (COSMOS_OBJ_SIZE / g_sectsize);
 		uint32_t target_cnt = g_sectcnt;
 		rc = spdk_nvme_ns_cmd_write(ns_entry->ns, ns_entry->qpair, seq->buf, target_lba,
 					    target_cnt, lba_complete, seq, 0);
@@ -232,7 +242,7 @@ do_rw_obj(void)
 			clock_gettime(CLOCK_MONOTONIC, &seq[i].ts_start);
 			g_obj_cmd.rsvd2 = (seq[i].phys_addr & 0xFFFFFFFFULL);
 			g_obj_cmd.rsvd3 = (seq[i].phys_addr >> 32);
-			g_obj_cmd.cdw10 = (g_cnt++) % COSMOS_MAX_OBJNO;
+			g_obj_cmd.cdw10 = next_idx();
 			g_obj_cmd.cdw12 = g_sectcnt - 1;
 			rc = spdk_nvme_ctrlr_io_cmd_raw_no_payload_build(ns_entry->ctrlr,
 									 ns_entry->qpair, &g_obj_cmd,
@@ -347,8 +357,6 @@ do_rw_lba(void)
 			}
 		}
 
-		g_obj_cmd.opc = g_write ? SPDK_NVME_OPC_COSMOS_WRITE : SPDK_NVME_OPC_COSMOS_READ;
-
 		struct timespec ts_start, ts_last, ts_cur;
 		clock_gettime(CLOCK_MONOTONIC, &ts_start);
 		ts_last = ts_start;
@@ -356,7 +364,7 @@ do_rw_lba(void)
 		// initial io
 		for (int i = 0; i < g_qdepth; i++) {
 			clock_gettime(CLOCK_MONOTONIC, &seq[i].ts_start);
-			uint64_t target_lba = ((g_cnt++) % COSMOS_MAX_OBJNO) * (COSMOS_OBJ_SIZE / g_sectsize);
+			uint64_t target_lba = next_idx() * (COSMOS_OBJ_SIZE / g_sectsize);
 			uint32_t target_cnt = g_sectcnt;
 			rc = spdk_nvme_ns_cmd_write(ns_entry->ns, ns_entry->qpair, seq[i].buf,
 						    target_lba, target_cnt, lba_complete, &seq[i], 0);
@@ -490,6 +498,7 @@ usage(const char *program_name)
 	fprintf(stderr, " -l         use lba io command (default)\n");
 	fprintf(stderr, " -o         use obj io command\n");
 	fprintf(stderr, " -i SEC     throughput report interval, use 0 to disable (default 0)\n");
+	fprintf(stderr, " -R         radnom io\n");
 }
 
 static int
@@ -497,7 +506,7 @@ parse_args(int argc, char **argv)
 {
 	int op;
 
-	while ((op = getopt(argc, argv, "Vwrc:q:t:loi:")) != -1) {
+	while ((op = getopt(argc, argv, "Vwrc:q:t:loi:R")) != -1) {
 		switch (op) {
 		case 'V':
 			g_vmd = true;
@@ -537,6 +546,9 @@ parse_args(int argc, char **argv)
 				fprintf(stderr, "wrong interval\n");
 				return 1;
 			}
+			break;
+		case 'R':
+			g_rand = true;
 			break;
 		default:
 			usage(argv[0]);

@@ -41,7 +41,7 @@ static bool g_vmd = false;
 static int g_sectsize;
 
 static bool g_write;
-static int g_sectcnt = 1024;
+static int g_sectcnt = 0;
 static int g_qdepth = 1;
 static int g_time = 10;
 
@@ -175,8 +175,12 @@ do_rw_obj(void)
 
 	ns_entry = g_namespaces;
 	if (ns_entry != NULL) {
-		if (g_sectcnt > 1024) {
-			fprintf(stderr, "IO size exceed 4M\n");
+		if (g_sectcnt == 0) {
+			g_sectcnt = COSMOS_OBJ_SIZE / COSMOS_OBJ_SECTSIZE;
+		}
+
+		if (g_sectcnt > COSMOS_OBJ_SIZE / COSMOS_OBJ_SECTSIZE) {
+			fprintf(stderr, "IO size exceed object size\n");
 			return;
 		}
 
@@ -297,8 +301,12 @@ do_rw_lba(void)
 		g_sectsize = spdk_nvme_ns_get_sector_size(ns_entry->ns);
 		printf("Sector size: %d\n", g_sectsize);
 
+		if (g_sectcnt == 0) {
+			g_sectcnt = COSMOS_OBJ_SIZE / g_sectsize;
+		}
+
 		if (1LL * g_sectsize * g_sectcnt > COSMOS_OBJ_SIZE) {
-			fprintf(stderr, "IO size exceed 4M\n");
+			fprintf(stderr, "IO size exceed object size\n");
 			return;
 		}
 
@@ -476,7 +484,7 @@ usage(const char *program_name)
 	fprintf(stderr, " -V         enumerate VMD\n");
 	fprintf(stderr, " -w         write\n");
 	fprintf(stderr, " -r         read\n");
-	fprintf(stderr, " -c SECT    sector count per io (default 1024)\n");
+	fprintf(stderr, " -c SECT    sector count per io (default maximum cnt\n");
 	fprintf(stderr, " -q DEPTH   queue depth (default 1)\n");
 	fprintf(stderr, " -t TIME    time in seconds (default 10)\n");
 	fprintf(stderr, " -l         use lba io command (default)\n");

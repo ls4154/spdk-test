@@ -1,42 +1,10 @@
-/*-
- *   BSD LICENSE
- *
- *   Copyright (c) Intel Corporation.
- *   All rights reserved.
- *
- *   Redistribution and use in source and binary forms, with or without
- *   modification, are permitted provided that the following conditions
- *   are met:
- *
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in
- *       the documentation and/or other materials provided with the
- *       distribution.
- *     * Neither the name of Intel Corporation nor the names of its
- *       contributors may be used to endorse or promote products derived
- *       from this software without specific prior written permission.
- *
- *   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *   "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *   OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *   SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *   LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *   DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *   THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- */
-
 #include "spdk/stdinc.h"
 
 #include "spdk/nvme.h"
 #include "spdk/vmd.h"
 #include "spdk/env.h"
 
+#include <time.h>
 #include <unistd.h>
 #include <fcntl.h>
 
@@ -90,54 +58,69 @@ register_ns(struct spdk_nvme_ctrlr *ctrlr, struct spdk_nvme_ns *ns)
 	       spdk_nvme_ns_get_size(ns) / 1000000000);
 }
 
-struct hello_world_sequence {
+struct nvme_rw_ctx {
 	struct ns_entry	*ns_entry;
 	char		*buf;
 	uint64_t	phys_addr;
 	int		is_completed;
+	struct timespec ts_start;
 };
 
 static void
 read_complete(void *arg, const struct spdk_nvme_cpl *completion)
 {
-	struct hello_world_sequence *sequence = arg;
+	struct nvme_rw_ctx *ctx = arg;
 	int wcnt;
+	struct timespec ts_cur;
 
-	sequence->is_completed = 1;
+	clock_gettime(CLOCK_MONOTONIC, &ts_cur);
+	fprintf(stderr, "latency: %lld ns\n", 1LL * (ts_cur.tv_sec - ctx->ts_start.tv_sec) * 1000000000
+					+ (ts_cur.tv_nsec - ctx->ts_start.tv_nsec));
+
+	ctx->is_completed = 1;
 	if (spdk_nvme_cpl_is_error(completion)) {
-		spdk_nvme_qpair_print_completion(sequence->ns_entry->qpair, (struct spdk_nvme_cpl *)completion);
-		fprintf(stderr, "I/O error status: %s\n", spdk_nvme_cpl_get_status_string(&completion->status));
+		spdk_nvme_qpair_print_completion(ctx->ns_entry->qpair,
+						 (struct spdk_nvme_cpl *)completion);
+		fprintf(stderr, "I/O error status: %s\n",
+				spdk_nvme_cpl_get_status_string(&completion->status));
 		fprintf(stderr, "Read I/O failed, aborting run\n");
-		sequence->is_completed = 2;
+		ctx->is_completed = 2;
 	}
 
-	wcnt = write(g_fd, sequence->buf, g_sectsize * g_lbacnt);
+	wcnt = write(g_fd, ctx->buf, g_sectsize * g_lbacnt);
 	fprintf(stderr, "%d bytes\n", wcnt);
 
-	spdk_free(sequence->buf);
+	spdk_free(ctx->buf);
 }
 
 static void
 write_complete(void *arg, const struct spdk_nvme_cpl *completion)
 {
-	struct hello_world_sequence *sequence = arg;
+	struct nvme_rw_ctx *ctx = arg;
+	struct timespec ts_cur;
 
-	sequence->is_completed = 1;
+	clock_gettime(CLOCK_MONOTONIC, &ts_cur);
+	fprintf(stderr, "latency: %lld ns\n", 1LL * (ts_cur.tv_sec - ctx->ts_start.tv_sec) * 1000000000
+					+ (ts_cur.tv_nsec - ctx->ts_start.tv_nsec));
+
+	ctx->is_completed = 1;
 	if (spdk_nvme_cpl_is_error(completion)) {
-		spdk_nvme_qpair_print_completion(sequence->ns_entry->qpair, (struct spdk_nvme_cpl *)completion);
-		fprintf(stderr, "I/O error status: %s\n", spdk_nvme_cpl_get_status_string(&completion->status));
+		spdk_nvme_qpair_print_completion(ctx->ns_entry->qpair,
+						 (struct spdk_nvme_cpl *)completion);
+		fprintf(stderr, "I/O error status: %s\n",
+				spdk_nvme_cpl_get_status_string(&completion->status));
 		fprintf(stderr, "Write I/O failed, aborting run\n");
-		sequence->is_completed = 2;
+		ctx->is_completed = 2;
 	}
-	spdk_free(sequence->buf);
+	spdk_free(ctx->buf);
 }
 
 static void
 do_rw(void)
 {
-	struct ns_entry			*ns_entry;
-	struct hello_world_sequence	sequence;
-	int				rc;
+	struct ns_entry		*ns_entry;
+	struct nvme_rw_ctx	ctx;
+	int			rc;
 
 	ns_entry = g_namespaces;
 	if (ns_entry != NULL) {
@@ -149,36 +132,38 @@ do_rw(void)
 
 		g_sectsize = spdk_nvme_ns_get_sector_size(ns_entry->ns);
 		fprintf(stderr, "Sector size %u\n", g_sectsize);
-		sequence.buf = spdk_zmalloc(g_sectsize * g_lbacnt, 0x1000, &sequence.phys_addr,
+		ctx.buf = spdk_zmalloc(g_sectsize * g_lbacnt, 0x1000, &ctx.phys_addr,
 				SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA);
-		printf("Buffer Phsysical Address: %lx\n", sequence.phys_addr);
-		if (sequence.buf == NULL) {
+		printf("Buffer Phsysical Address: %lx\n", ctx.phys_addr);
+		if (ctx.buf == NULL) {
 			fprintf(stderr, "ERROR: write buffer allocation failed\n");
 			return;
 		}
-		sequence.is_completed = 0;
-		sequence.ns_entry = ns_entry;
+		ctx.is_completed = 0;
+		ctx.ns_entry = ns_entry;
 
 		if (g_write) {
-			int rcnt = read(g_fd, sequence.buf, g_sectsize * g_lbacnt);
+			int rcnt = read(g_fd, ctx.buf, g_sectsize * g_lbacnt);
 			fprintf(stderr, "%d bytes\n", rcnt);
 
-			rc = spdk_nvme_ns_cmd_write(ns_entry->ns, ns_entry->qpair, sequence.buf,
-					g_startlba, g_lbacnt, write_complete, &sequence, 0);
+			clock_gettime(CLOCK_MONOTONIC, &ctx.ts_start);
+			rc = spdk_nvme_ns_cmd_write(ns_entry->ns, ns_entry->qpair, ctx.buf,
+					g_startlba, g_lbacnt, write_complete, &ctx, 0);
 			if (rc != 0) {
 				fprintf(stderr, "starting write I/O failed\n");
 				exit(1);
 			}
 		} else {
-			rc = spdk_nvme_ns_cmd_read(ns_entry->ns, ns_entry->qpair, sequence.buf,
-					g_startlba, g_lbacnt, read_complete, &sequence, 0);
+			clock_gettime(CLOCK_MONOTONIC, &ctx.ts_start);
+			rc = spdk_nvme_ns_cmd_read(ns_entry->ns, ns_entry->qpair, ctx.buf,
+					g_startlba, g_lbacnt, read_complete, &ctx, 0);
 			if (rc != 0) {
 				fprintf(stderr, "starting read I/O failed\n");
 				exit(1);
 			}
 		}
 
-		while (!sequence.is_completed)
+		while (!ctx.is_completed)
 			spdk_nvme_qpair_process_completions(ns_entry->qpair, 0);
 
 		spdk_nvme_ctrlr_free_io_qpair(ns_entry->qpair);
@@ -260,10 +245,10 @@ usage(const char *program_name)
 	fprintf(stderr, "options:\n");
 	fprintf(stderr, " -V         enumerate VMD\n");
 	fprintf(stderr, " -w         write\n");
-	fprintf(stderr, " -r         read\n");
-	fprintf(stderr, " -f FILE    input/output file\n");
-	fprintf(stderr, " -s LBA     start lba\n");
-	fprintf(stderr, " -c NLBA    number of blocks\n");
+	fprintf(stderr, " -r         read (default)\n");
+	fprintf(stderr, " -f FILE    input/output file (use stdin/stdout by default)\n");
+	fprintf(stderr, " -s LBA     start lba (default 0)\n");
+	fprintf(stderr, " -c NLBA    number of blocks (default 1)\n");
 }
 
 static int
@@ -355,12 +340,12 @@ int main(int argc, char **argv)
 	} else {
 		if (g_fpath) {
 			g_fd = open(g_fpath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-		} else {
-			g_fd = STDOUT_FILENO;
 			if (g_fd == -1) {
 				perror("open");
 				return 1;
 			}
+		} else {
+			g_fd = STDOUT_FILENO;
 		}
 	}
 

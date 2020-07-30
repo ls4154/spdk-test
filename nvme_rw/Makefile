@@ -36,4 +36,6 @@ SPDK_ROOT_DIR := $(abspath $(SPDK_DIR))
 
 APP = nvme_rw
 
+CONFIG_DEBUG := n
+
 include $(SPDK_ROOT_DIR)/mk/nvme.libtest.mk
